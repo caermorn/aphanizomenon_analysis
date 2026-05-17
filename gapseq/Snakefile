@@ -1,0 +1,111 @@
+#############################################
+# Snakefile: GapSeq models from final MAGs
+#############################################
+
+from glob import glob
+import os
+
+ASSEMBLY_BASE = "/mnt/workspace/petr/INTEC/PANGENOME/ASSEMBLED"
+MODEL_BASE = "/mnt/workspace/petr/INTEC/PANGENOME/MODELS"
+
+DRAFT_DIR = f"{MODEL_BASE}/DRAFT"
+FILLED_DIR = f"{MODEL_BASE}/FILLED"
+
+GAPSEQ_DIR = "/mnt/workspace/special_soft/gapseq"
+DEFAULT_MEDIUM = "/mnt/workspace/petr/metabolic_models/resources/BG11_minimal.csv"
+
+
+BIN_FASTA = {}
+
+for fa in glob(f"{ASSEMBLY_BASE}/Run_*/barcode*/mags_filtered/*.fa"):
+    barcode = fa.split("/")[-3]  # barcodeXX
+    bin_name = os.path.splitext(os.path.basename(fa))[0]
+    BIN_FASTA[(barcode, bin_name)] = fa
+
+BIN_KEYS = sorted(BIN_FASTA.keys())
+
+if not BIN_KEYS:
+    raise ValueError("No MAGs found in mags_filtered directories!")
+
+#############################################
+# Targets
+#############################################
+
+rule all:
+    input:
+        expand(
+            f"{FILLED_DIR}/{{barcode}}/{{bin}}/{{bin}}.xml",
+            zip,
+            barcode=[k[0] for k in BIN_KEYS],
+            bin=[k[1] for k in BIN_KEYS]
+        )
+
+#############################################
+# GapSeq: draft metabolic model
+#############################################
+
+rule run_gapseq:
+    input:
+        fasta=lambda wc: BIN_FASTA[(wc.barcode, wc.bin)]
+    output:
+        xml=f"{DRAFT_DIR}/{{barcode}}/{{bin}}/{{bin}}-draft.xml"
+    log:
+        f"{DRAFT_DIR}/{{barcode}}/{{bin}}/{{bin}}.log"
+    params:
+        wdir=f"{DRAFT_DIR}/{{barcode}}/{{bin}}",
+        bind=GAPSEQ_DIR
+    threads: 5
+    conda:
+        "gapseq"
+    shell:
+        r"""
+        mkdir -p {params.wdir}
+
+        inf=$(realpath {input.fasta})
+        inf_stem=$(basename $inf)
+        log=$(realpath {log})
+
+        cd {params.wdir}
+        cp $inf .
+
+        {params.bind}/gapseq doall \
+            -n \
+            -K {threads} \
+            $inf_stem \
+            Bacteria &> $log
+        """
+
+#############################################
+# GapSeq: gap filling (BG11 minimal)
+#############################################
+
+rule run_gapfill:
+    input:
+        xml=f"{DRAFT_DIR}/{{barcode}}/{{bin}}/{{bin}}-draft.xml"
+    output:
+        xml=f"{FILLED_DIR}/{{barcode}}/{{bin}}/{{bin}}.xml"
+    log:
+        f"{FILLED_DIR}/{{barcode}}/{{bin}}/{{bin}}.log"
+    params:
+        wdir=f"{FILLED_DIR}/{{barcode}}/{{bin}}",
+        instem=f"{DRAFT_DIR}/{{barcode}}/{{bin}}/{{bin}}",
+        bind=GAPSEQ_DIR,
+        media=DEFAULT_MEDIUM
+    threads: 5
+    conda:
+        "gapseq"
+    shell:
+        r"""
+        mkdir -p {params.wdir}
+
+        instem=$(realpath {params.instem})
+        log=$(realpath {log})
+
+        cd {params.wdir}
+
+        {params.bind}/gapseq fill \
+            --media {params.media} \
+            -m $instem-draft.RDS \
+            -c $instem-rxnWeights.RDS \
+            -g $instem-rxnXgenes.RDS &> $log
+        """
